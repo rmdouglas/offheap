@@ -4,7 +4,11 @@
 
 ## Interface
 
-* `val copy : ?alloc:alloc -> 'a -> 'a t`
+* `val words : ?static:bool -> 'a -> int`
+
+Traverses the object, and returns the total words (similar to Obj.reachable_words)
+
+* `val copy : ?static:bool -> ?alloc:alloc -> 'a -> 'a t`
 
 Creates a copy of an object, returning a handle to it. The handle is required to free the object. The old value is still usable.
 

@@ -21,9 +21,9 @@ let test_cycle () =
 let test_bytes () =
   (* Tests a sequence of bytes. *)
   let x =
-      "I know a mouse, and he hasn’t got a house" ^
-      "I don't know why. I call him Gerald." ^
-      "He's getting rather old, but he's a good mouse."
+    "I know a mouse, and he hasn’t got a house" ^
+    "I don't know why. I call him Gerald." ^
+    "He's getting rather old, but he's a good mouse."
   in
   let y = Offheap.copy x in
   let z = Offheap.get y in
@@ -54,12 +54,20 @@ let test_closure () =
   Offheap.delete y
 
 let test_abstract () =
-  (* Should fail if object is abstract. *)
-  try
-    let rec x = { a = x; b = B; c = C } in
-    ignore (Offheap.copy (Offheap.copy x));
-    failwith "failed"
-  with Invalid_argument _ -> ()
+  let module M : sig
+    type t
+    val of_int : int -> t
+    val equal : t -> t -> bool
+  end = struct
+    type t = int
+    let of_int = Fun.id
+    let equal = Int.equal
+  end in
+
+  let x = M.of_int 10 in
+  let y = Offheap.copy x in
+  let z = Offheap.get y in
+  check "" (M.equal x z)
 
 let test_primitives () =
   (* Should handle primitives. *)
@@ -88,10 +96,10 @@ let test_nativeint () =
 let test_page_table_add () =
   (* Should be marked as being part of a value area so compare/hash work. *)
   let x = Some (
-    "I've got a clan of gingerbread men." ^
-    "Here a man, there a man, lots of gingerbread men." ^
-    "Take a couple if you wish. They're on the dish."
-  ) in
+      "I've got a clan of gingerbread men." ^
+      "Here a man, there a man, lots of gingerbread men." ^
+      "Take a couple if you wish. They're on the dish."
+    ) in
   let y = Offheap.copy x in
   let z = Offheap.get y in
   check "" (Stdlib.compare x z = 0);

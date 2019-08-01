@@ -1,7 +1,6 @@
 (library
   (name offheap)
   (public_name offheap)
-  (cxx_names offheap)
-  (cxx_flags (-Wall -g -x c++ -fPIC -c))
-  (c_library_flags -lstdc++)
+  (c_names offheap)
+  (c_flags (-Wall -g -fPIC -c))
   (install_c_headers offheap))

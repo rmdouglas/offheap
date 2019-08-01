@@ -5,17 +5,17 @@ type 'a t
 type alloc
 
 
-external words : bool -> 'a -> (int [@untagged]) = "offheap_words" "offheap_words_untagged"
+external words : bool -> 'a -> (int [@untagged]) = "caml_offheap_words" "caml_offheap_words_untagged"
 let words ?static:(static=false) a =
   words static a
 
-external copy_with_alloc : bool -> alloc -> 'a -> 'a t = "offheap_copy_with_alloc"
+external copy_with_alloc : bool -> alloc -> 'a -> 'a t = "caml_offheap_copy_with_alloc"
 
-external get_alloc : unit -> alloc = "offheap_get_alloc"
+external get_alloc : unit -> alloc = "caml_offheap_get_alloc"
 
-external get : 'a t -> 'a = "offheap_get"
+external get : 'a t -> 'a = "caml_offheap_get"
 
-external delete : 'a t -> unit = "offheap_delete"
+external delete : 'a t -> unit = "caml_offheap_delete"
 
 
 let malloc = get_alloc ()

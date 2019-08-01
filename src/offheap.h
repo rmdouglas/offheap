@@ -41,11 +41,17 @@ typedef struct {
 /**
  * Copies an object off the heap, into a buffer allocated by an allocator.
  */
-/*
+
 offheap_buffer_t offheap_copy(
     value v,
-    queue_t queue,
     void *data,
     alloc_t allocFn,
     int copyStatic);
-*/
+
+/**
+ * Gets the size of the object, in bytes.
+ */
+size_t offheap_words(
+  value v, 
+  int copyStatic
+);
