@@ -1,7 +1,13 @@
 // Copies objects out of the OCaml heap where they are not managed by the GC
 
-#include <string.h>
+#include <stdio.h>
+#include <memory.h>
+#include <string>
+#include <assert.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include <caml/address_class.h>
 #include <caml/alloc.h>
 #include <caml/config.h>
@@ -10,15 +16,54 @@
 #include <caml/gc.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
 
 #include "offheap.h"
 
+using namespace std;
 
 
 #define ENTRIES_PER_QUEUE_CHUNK 4096
 
 #define Ptr_val(v) ((void *)((v) & ~1))
 #define Val_ptr(v) ((value)(((uintptr_t)(v)) | 1))
+#define DEBUG
+
+#ifdef DEBUG
+#include <stdarg.h>
+static char padding[1024] = {'\0'};
+static size_t depth = 0;
+struct logger {
+  const char * _function;
+  logger(const char* function, const char* file, const int line)
+    : _function(function)
+  {
+    fprintf(stderr, "%s> %s (int %s, line %d)\n", padding, _function, file, line);
+    padding[depth] = ' ';
+    depth++;
+  }
+  ~logger() {
+    depth--;
+    padding[depth] = '\0';
+    fprintf(stderr, "%s< %s\n", padding, _function);
+  }
+  void log(const char *fmt, ...) {
+    fprintf(stderr, "%s", padding);
+    va_list args;
+    va_start(args, fmt);
+    fprintf(stderr, fmt, args);
+    va_end(args);
+  }
+};
+
+#define ENTER() logger __logger__(__FUNCTION__, __FILE__, __LINE__)
+#define LOG(...) fprintf(stderr, "%s", padding); fprintf(stderr, __VA_ARGS__)
+#else
+#define ENTER()
+#define LOG(fmt, ...)
+#endif
 
 
 /**
@@ -26,7 +71,7 @@
  */
 typedef struct queue_item {
   /// Pointer to the copied block.
-  value value;
+  value block;
   /// Saved header value.
   header_t header;
 } queue_item_t;
@@ -65,8 +110,15 @@ typedef struct queue {
  */
 void *offheap_alloc(value allocator, size_t size)
 {
+  ENTER();
   void *ptr = malloc(size);
-  caml_page_table_add(In_static_data, ptr, (void *)((uintptr_t)ptr + size));
+  if(ptr != NULL) {
+    auto r = caml_page_table_add(In_static_data, ptr, (void *)((uintptr_t)ptr + size));
+    if(r != 0) {
+      free(ptr);
+      ptr = NULL;
+    }
+  }
   return ptr;
 }
 
@@ -76,6 +128,8 @@ void *offheap_alloc(value allocator, size_t size)
  */
 void offheap_free(value allocator, void *ptr, size_t size)
 {
+  ENTER();
+  assert(ptr != NULL);
   caml_page_table_remove(In_static_data, ptr, (void *)((uintptr_t)ptr + size));
   free(ptr);
 }
@@ -86,6 +140,7 @@ void offheap_free(value allocator, void *ptr, size_t size)
  */
 void queue_init(queue_t *q)
 {
+  ENTER();
   q->first_chunk.next = NULL;
   q->read_chunk = &q->first_chunk;
   q->write_chunk = &q->first_chunk;
@@ -99,8 +154,10 @@ void queue_init(queue_t *q)
  */
 int queue_push(queue_t *q, value v, header_t hdr)
 {
-  if (q->write_pos == ENTRIES_PER_QUEUE_CHUNK) {
-    struct queue_chunk *new_chunk = malloc(sizeof(struct queue_chunk));
+  ENTER();
+  if (q->write_pos == ENTRIES_PER_QUEUE_CHUNK)
+  {
+    struct queue_chunk *new_chunk = (struct queue_chunk*) malloc(sizeof(struct queue_chunk));
     if (new_chunk == NULL) {
       return 0;
     }
@@ -111,7 +168,7 @@ int queue_push(queue_t *q, value v, header_t hdr)
   }
 
   struct queue_item *item = &q->write_chunk->entries[q->write_pos++];
-  item->value = v;
+  item->block = v;
   item->header = hdr;
   return 1;
 }
@@ -122,7 +179,9 @@ int queue_push(queue_t *q, value v, header_t hdr)
  */
 queue_item_t queue_pop(queue_t *q)
 {
-  if (q->read_pos == ENTRIES_PER_QUEUE_CHUNK) {
+  ENTER();
+  if (q->read_pos == ENTRIES_PER_QUEUE_CHUNK)
+  {
     q->read_pos = 0;
     q->read_chunk = q->read_chunk->next;
   }
@@ -134,6 +193,7 @@ queue_item_t queue_pop(queue_t *q)
  */
 int queue_empty(queue_t *q)
 {
+  ENTER();
   return q->read_pos == q->write_pos && q->read_chunk == q->write_chunk;
 }
 
@@ -143,6 +203,7 @@ int queue_empty(queue_t *q)
  */
 void queue_reset(queue_t *q)
 {
+  ENTER();
   q->read_pos = 0;
   q->read_chunk = &q->first_chunk;
 }
@@ -153,6 +214,7 @@ void queue_reset(queue_t *q)
  */
 void queue_free(queue_t *q)
 {
+  ENTER();
   struct queue_chunk *chunk = q->first_chunk.next;
   while (chunk) {
     struct queue_chunk *next = chunk->next;
@@ -167,10 +229,13 @@ void queue_free(queue_t *q)
  */
 static inline int isObjectValid(value val)
 {
-  switch (Tag_val(val)) {
-    case Abstract_tag: {
-      // Abstract objects definitely cannot be copied.
-      return 0;
+  ENTER();
+  switch (Tag_val(val))
+  {
+  case Abstract_tag:
+  {
+    // Abstract objects definitely cannot be copied.
+    return 0;
     }
     case Custom_tag: {
       // Some custom objects present in the runtime can be simply copied.
@@ -205,7 +270,9 @@ static inline int isObjectValid(value val)
  */
 static inline int shouldCopy(value v, int copyStatic)
 {
-  if (!Is_block(v)) {
+  ENTER();
+  if (!Is_block(v))
+  {
     return 0;
   } else {
     int kind = Classify_addr(v);
@@ -220,16 +287,18 @@ static inline int shouldCopy(value v, int copyStatic)
 }
 
 /**
- * Copies an object into a buffer, returning a pointer to the buffer.
+ * Traverses the object graph, and marks the interesting objects.
+ * Returns the total size of the object graph
  */
-offheap_buffer_t offheap_copy(
+intnat offheap_mark(
     value v,
-    void *data,
-    alloc_t allocFn,
+    struct queue* q,
     int copyStatic)
 {
-  static struct queue q;
-  queue_init(&q);
+  ENTER();
+  queue_init(q);
+
+  intnat size = 0;
 
   // Adjust the pointer for infix values.
   if (Tag_val(v) == Infix_tag) {
@@ -237,71 +306,78 @@ offheap_buffer_t offheap_copy(
   }
 
   // Ensure the value can be copied.
-  if (!isObjectValid(v)) {
-    offheap_buffer_t result;
-    result.ptr = NULL;
-    result.size = 0;
-    return result;
-  }
+  if (isObjectValid(v)) {
 
-  // Push the first item with offset 0 and marks its header.
-  queue_push(&q, v, Hd_val(v));
-  Hd_val(v) = Make_header(0, Tag_val(v), Caml_blue);
+    // Push the first item with offset 0 and marks its header.
+    queue_push(q, v, Hd_val(v));
+    Hd_val(v) = Make_header(0, Tag_val(v), Caml_blue);
 
-  // First pass: traverse the object and compute the size of the final copy,
-  // in bytes. The queue will contain the unrolled list of all blocks.
-  intnat size = 0;
-  while (!queue_empty(&q)) {
-    // Pop the next element from the queue and read information from the header
-    // before the size in the header is overwritten with the new offset of the
-    // object into the buffer in which the copy will be allocated.
-    const queue_item_t item = queue_pop(&q);
-    const value node = item.value;
-    const header_t hd = item.header;
-    const mlsize_t sz = Wosize_hd(hd);
-    const tag_t tag = Tag_hd(hd);
+    // First pass: traverse the object and compute the size of the final copy,
+    // in bytes. The queue will contain the unrolled list of all blocks.
+    while (!queue_empty(q)) {
+      // Pop the next element from the queue and read information from the header
+      // before the size in the header is overwritten with the new offset of the
+      // object into the buffer in which the copy will be allocated.
+      const queue_item_t item = queue_pop(q);
+      const value node = item.block;
+      const header_t hd = item.header;
+      const mlsize_t sz = Wosize_hd(hd);
+      const tag_t tag = Tag_hd(hd);
+      LOG("Traversing %lu (size: %lu, tag: %u, offset: %lu)\n", node, sz, tag, size);
 
-    // Advance the pointer by the size of the block. Since we inspect the colour
-    // encoded in the header when checking pointers to this object, we keep the
-    // header correctly formatted, with colour and tag intact.
-    const mlsize_t bytes = Bhsize_hd(hd);
-    Hd_val(node) = Make_header(size, tag, Caml_blue);
-    size += bytes;
+      // Advance the pointer by the size of the block. Since we inspect the colour
+      // encoded in the header when checking pointers to this object, we keep the
+      // header correctly formatted, with colour and tag intact.
+      const mlsize_t bytes = Bhsize_hd(hd);
+      Hd_val(node) = Make_header(size, tag, Caml_blue);
+      size += bytes;
 
-    if (tag < No_scan_tag) {
-      // Push the interesting fields on the queue.
-      for (int i = 0; i < sz; ++i) {
-        const value field = Field(node, i);
+      if (tag < No_scan_tag) {
+        // Push the interesting fields on the queue.
+        for (mlsize_t i = 0; i < sz; ++i) {
+          const value field = Field(node, i);
 
-        // Skip over primitive fields and non-heap pointers.
-        if (!shouldCopy(field, copyStatic)) {
-          continue;
+          // Skip over primitive fields and non-heap pointers.
+          if (!shouldCopy(field, copyStatic)) {
+            continue;
+          }
+
+          const header_t fh = Hd_val(field);
+
+          // Off-heap objects cannot point back to the heap and we cannot copy
+          // custom objects as we do not know anything about their internals.
+          if (!isObjectValid(field)) {
+            size = -2;
+            break;
+          }
+
+          // Skip already visited objects: their header is blue.
+          if (Color_hd(fh) == Caml_blue) {
+            continue;
+          }
+
+          // Add the item to the queue and mark the chunk as visited.
+          if (!queue_push(q, field, fh)) {
+            size = -1;
+            break;
+          }
+          Hd_val(field) = Bluehd_hd(fh);
         }
-
-        const header_t fh = Hd_val(field);
-        const tag_t th = Tag_hd(fh);
-
-        // Off-heap objects cannot point back to the heap and we cannot copy
-        // custom objects as we do not know anything about their internals.
-        if (!isObjectValid(field)) {
-          size = -2;
-          goto error;
-        }
-
-        // Skip already visited objects: their header is blue.
-        if (Color_hd(fh) == Caml_blue) {
-          continue;
-        }
-
-        // Add the item to the queue and mark the chunk as visited.
-        if (!queue_push(&q, field, fh)) {
-          size = -1;
-          goto error;
-        }
-        Hd_val(field) = Bluehd_hd(fh);
       }
     }
   }
+  LOG("Total marked size (bytes): %lu (words: %lu)\n", size, size / sizeof(value));
+  return size;
+}
+
+offheap_buffer_t offheap_copy(
+    intnat size,
+    struct queue *q,
+    void *data,
+    alloc_t allocFn,
+    int copyStatic)
+{
+  ENTER();
 
   // Now that the size is known, allocate a contiguous off-heap
   // buffer large enough to hold the entire object.
@@ -310,11 +386,11 @@ offheap_buffer_t offheap_copy(
   // Second pass: Adjust all pointers.
   if (buffer) {
     uintptr_t ptr = buffer;
-    queue_reset(&q);
-    while (!queue_empty(&q)) {
+    queue_reset(q);
+    while (!queue_empty(q)) {
       // Pop the pointer and its old header.
-      const queue_item_t item = queue_pop(&q);
-      const value node = item.value;
+      const queue_item_t item = queue_pop(q);
+      const value node = item.block;
       const header_t hd = item.header;
       const mlsize_t sz = Wosize_hd(hd);
       const tag_t tag = Tag_hd(hd);
@@ -327,7 +403,7 @@ offheap_buffer_t offheap_copy(
       // Set up the new object.
       if (tag < No_scan_tag) {
         // Regular object - copy field by field.
-        for (int i = 0; i < sz; ++i) {
+        for (mlsize_t i = 0; i < sz; ++i) {
           value field = Field(node, i);
 
           if (!shouldCopy(field, copyStatic)) {
@@ -355,26 +431,47 @@ offheap_buffer_t offheap_copy(
 
     CAMLassert(ptr == buffer + size);
   }
-
-error:
-  // Third pass: reset all the headers.
-  queue_reset(&q);
-  while (!queue_empty(&q)) {
-    queue_item_t item = queue_pop(&q);
-    Hd_val(item.value) = item.header;
-  }
-  queue_free(&q);
-
   offheap_buffer_t result;
   result.ptr = size < 0 ? NULL : (void *)buffer;
   result.size = size;
   return result;
 }
 
-
-CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
+void offheap_unmark(struct queue *q)
 {
-  CAMLparam2(allocator, obj);
+  ENTER();
+  // Third pass: reset all the headers.
+  queue_reset(q);
+  while (!queue_empty(q)) {
+    queue_item_t item = queue_pop(q);
+    Hd_val(item.block) = item.header;
+  }
+  queue_free(q);
+}
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+CAMLprim intnat offheap_words_untagged(value copyStatic, value obj) {
+  ENTER();
+  assert(copyStatic == Val_true || copyStatic == Val_false);
+  static struct queue q;
+  intnat bytes = offheap_mark(obj, &q, copyStatic == Val_true);
+  offheap_unmark(&q);
+  return bytes/sizeof(value);
+}
+CAMLprim value offheap_words(value copyStatic, value obj) {
+  ENTER();
+  assert(copyStatic == Val_true || copyStatic == Val_false);
+  intnat words = offheap_words_untagged(copyStatic, obj);
+  return Val_long(words);
+}
+CAMLprim value offheap_copy_with_alloc(value copyStatic, value allocator, value obj)
+{
+  ENTER();
+  assert(copyStatic == Val_true || copyStatic == Val_false);
+  CAMLparam3(copyStatic, allocator, obj);
   CAMLlocal1(proxy);
 
   // If the object is not on the OCaml heap, return it unchanged.
@@ -382,11 +479,16 @@ CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
     CAMLreturn(obj);
   }
 
+  static struct queue q;
+
   // Fetch the allocator function.
   alloc_t allocFn = (alloc_t)Field(allocator, 0);
 
   // Copy the object.
-  offheap_buffer_t buffer = offheap_copy(obj, (void *)allocator, allocFn, 0);
+  intnat size = offheap_mark(obj, &q, copyStatic == Val_true);
+  offheap_buffer_t buffer = offheap_copy(size, &q, (void *)allocator, allocFn, copyStatic == Val_true);
+  offheap_unmark(&q);
+  
   if (buffer.ptr == NULL) {
     caml_invalid_argument("object could not be copied off-heap");
   }
@@ -408,6 +510,7 @@ CAMLprim value offheap_copy_with_alloc(value allocator, value obj)
 
 CAMLprim value offheap_get(value obj)
 {
+  ENTER();
   CAMLparam1(obj);
 
   // If the object is not on the OCaml heap, return it unchanged.
@@ -428,6 +531,7 @@ CAMLprim value offheap_get(value obj)
 
 CAMLprim value offheap_delete(value obj)
 {
+  ENTER();
   CAMLparam1(obj);
   CAMLlocal1(allocator);
 
@@ -460,6 +564,7 @@ CAMLprim value offheap_delete(value obj)
 
 CAMLprim value offheap_get_alloc(value unit)
 {
+  ENTER();
   CAMLparam1(unit);
   CAMLlocal1(block);
 
@@ -471,4 +576,6 @@ CAMLprim value offheap_get_alloc(value unit)
 
   CAMLreturn(block);
 }
-
+#ifdef __cplusplus
+} /* extern "C" */
+#endif

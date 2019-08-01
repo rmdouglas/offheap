@@ -5,6 +5,8 @@ type 'a t
 type alloc
 
 
+val words : ?static:bool -> 'a -> int
+  (** [words obj] returns the size of the object graph reachable from obj *)
 
 val malloc : alloc
   (** [malloc] is the default memory manager.
@@ -12,7 +14,7 @@ val malloc : alloc
    * This allocator uses [malloc] to [allocate] and free to deallocate memory.
    *)
 
-val copy : ?alloc:alloc -> 'a -> 'a t
+val copy : ?static:bool -> ?alloc:alloc -> 'a -> 'a t
   (** [copy obj] creates a deep copy of an object outside the OCaml heap.
     *
     * The object cannot point to any abstract or custom objects and the copy
